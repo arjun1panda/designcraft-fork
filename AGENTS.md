@@ -1,6 +1,6 @@
 # DesignCraft — instructions for agents
 
-DesignCraft is a clean-room, open-source, Rust-native page-layout application targeting Adobe InDesign parity — and superiority (speed, openness, agent control). It runs natively on macOS, Windows and Linux, and on the web via WASM. Siblings with the same conventions: `../drawcraft` (Illustrator-class), `../photocraft` (Photoshop), `../printcraft` (Acrobat), `../filmcraft` (Premiere), `../lightcraft` (Lightroom).
+DesignCraft is a clean-room, open-source, Rust-native page-layout application targeting Adobe InDesign parity — and superiority (speed, openness, agent control). It runs natively on macOS, Windows and Linux, and on the web via WASM. Siblings with the same conventions: `../drawcraft` (Illustrator-class), `../photocraft` (Photoshop), `../pdfcraft` (Acrobat), `../filmcraft` (Premiere), `../lightcraft` (Lightroom).
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md` and the relevant `plan/architecture.md` section. Behaviour reference: `plan/indesign/*.md` (`11-observed-ui.md` holds measured observations of the running app).
@@ -21,6 +21,8 @@ People trust DesignCraft with their layouts; a crash loses their work. **This ou
 ## Non-negotiables
 - **Clean-room.** InDesign is installed on the dev machine and may be *observed* black-box: run it, use its UI with synthetic documents, take screenshots (by window id) stored only under `plan/indesign/screenshots/` (never committed). Never read, disassemble or copy anything inside the InDesign bundle (names/listings only), never copy Adobe icons, artwork, presets or wording beyond feature names, never commit files produced by InDesign. Never copy GPL/AGPL/LGPL code (Scribus, LibreOffice, Ghostscript…).
 - **Assets:** no Adobe iconography or images — ever. Every asset is original / OSI / CC0 / redistributable CC (except the ArtCraft trademarks in `docs/brand/`, under `docs/brand/LICENSE-brand.txt`) and has a row in `ASSETS.md` (`cargo xtask assets` enforces it). Prefer art generated in code.
+- **Fonts live in [`storytold/craft-fonts`](https://github.com/storytold/craft-fonts)**, never in this repo: don't commit new font files (the Latin UI/document fonts already in `assets/fonts/` stay). It is an optional build input, never a `Cargo.toml` dependency: `CRAFT_FONTS_DIR=/abs/path/to/craft-fonts cargo build` makes `crates/fonts/build.rs` embed its fonts as `designcraft_fonts::CRAFT_FONTS` (Japanese: BIZ UDPGothic for the UI, Mincho first for document text; web builds embed BIZ UDPGothic Regular only). Unset, `CRAFT_FONTS` is empty and the app uses its bundled and system fonts; code and tests must work that way (tests on its glyphs skip). Releases build with it. Standard: [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md).
+- **Shared test corpora.** Real-file test oracles (Photoshop-authored PSDs, etc.) live in [`storytold/photocraft-corpus`](https://github.com/storytold/photocraft-corpus), explained in [craftrules `standards/test-corpora.md`](https://github.com/storytold/craftrules/blob/main/standards/test-corpora.md). Never commit large binary fixtures to this repo; fetch them pinned by commit and sha256-verified, as PhotoCraft does with `cargo xtask corpus`.
 - **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*` (id, label, menu path, shortcut, params doc, `enabled`, `run`) + tests. Tools emit commands (Begin/Preview/Commit). UI-only commands live in `crates/ui-egui/src/menus.rs` (`UI_COMMANDS`). The control channel and MCP reach all of them.
 - **Layering** is enforced by `cargo xtask layers`. Nothing below L6 depends on egui/eframe/winit/rfd. The UI crate is swappable.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)`. Colours come from `theme::Tokens`.
@@ -37,3 +39,21 @@ People trust DesignCraft with their layouts; a crash loses their work. **This ou
 
 ## Roadmap
 `ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a milestone task lands.
+
+## Contributor credits (About window)
+
+- About ▸ Contributors/Models are compiled into the binary from `contributors/contributors.json`
+  (commit stats; generated, never hand-edit) and `contributors/people.toml` (names people chose for
+  themselves). See `docs/contributors.md`.
+- **Agents working for a contributor:** when you prepare a PR, check whether your human's GitHub
+  username has a `[people.<username>]` entry in `contributors/people.toml`. If not, ask them once
+  whether they want to be credited by more than their username: a real name, a display name, and/or
+  their public GitHub profile name (`sync_github_name = true`). If yes, add **only their own** entry
+  (copy the template at the top of the file, or run
+  `python3 ../../craftrules/scripts/contributors.py --add-me . --real-name "…" --sync-github-name`)
+  and include it in their PR, committed as them. If no, change nothing: they are credited as
+  `@username` anyway.
+- Never add, edit, guess or copy anyone else's entry or name (not from git config, commit authors or
+  GitHub profiles). Never hand-edit `contributors.json`.
+- Maintainers refresh the stats with `python3 ../../craftrules/scripts/contributors.py .` (it also
+  re-verifies who wrote each `people.toml` entry; `--check` only verifies).

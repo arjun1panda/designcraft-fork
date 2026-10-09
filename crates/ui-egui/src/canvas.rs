@@ -328,7 +328,14 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     // Cursor.
     if let Some(p) = resp.hover_pos().filter(|p| screen.contains(*p)) {
         let space = ui.input(|i| i.key_down(egui::Key::Space)) && !app.session.wants_text();
-        let c = if space { Cursor::Hand } else { app.session.cursor(xf.to_canvas(p), ui.input(|i| mods(i, false)), app.view_info()) };
+        let middle = ui.input(|i| i.pointer.middle_down());
+        let c = if middle {
+            Cursor::HandGrab
+        } else if space {
+            Cursor::Hand
+        } else {
+            app.session.cursor(xf.to_canvas(p), ui.input(|i| mods(i, false)), app.view_info())
+        };
         ui.ctx().set_cursor_icon(cursor_icon(c));
     }
 }
@@ -939,7 +946,7 @@ fn draw_text_selection(
     if let Some(sel) = cells.filter(|c| c.story == ts.story) {
         for ft in &cs.frames {
             let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { continue };
-            let m = a * it.text_xf();
+            let m = a * doc.text_xf(it);
             for t in ft.tables.iter().filter(|t| t.table == sel.table) {
                 for c in t.cells.iter().filter(|c| sel.range.contains(c.row, c.col)) {
                     let q = [
@@ -962,7 +969,7 @@ fn draw_text_selection(
     for (fi, ft) in cs.frames.iter().enumerate() {
         let Some((a, _)) = item_canvas_xf(doc, layout, ft.frame) else { continue };
         let Some(it) = doc.item(ft.frame) else { continue };
-        let m = a * it.text_xf();
+        let m = a * doc.text_xf(it);
         // Show the frame edge while typing.
         for poly in path_screen(it, xf, a) {
             painter.add(egui::Shape::line(poly, Stroke::new(1.0, layer_color(doc, it).gamma_multiply(0.6))));
@@ -1022,7 +1029,7 @@ fn draw_text_selection(
         && let Some(ft) = cs.frames.get(fi)
         && let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame))
     {
-        let m = a * it.text_xf();
+        let m = a * doc.text_xf(it);
         let blink = (painter.ctx().input(|i| i.time) * 1.6) as i64 % 2 == 0;
         if blink {
             let p0 = xf.to_screen(m * Point::new(x, bl - asc));
@@ -1053,7 +1060,7 @@ fn draw_cell_selection(
     let Some((fi, origin, text)) = found else { return };
     let Some(ft) = cs.frames.get(fi) else { return };
     let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { return };
-    let m = a * it.text_xf() * designcraft_geom::Affine::translate(origin.to_vec2());
+    let m = a * doc.text_xf(it) * designcraft_geom::Affine::translate(origin.to_vec2());
     let range = ts.range();
     if !range.is_empty()
         && let Some(cft) = text.frames.first()
@@ -1081,7 +1088,7 @@ fn draw_cell_selection(
             None => compose::cell_caret(cs, cell.table, cell.row, cell.col, ts.focus),
         }
     {
-        let m = a * it.text_xf();
+        let m = a * doc.text_xf(it);
         let blink = (painter.ctx().input(|i| i.time) * 1.6) as i64 % 2 == 0;
         if blink {
             painter.line_segment(
@@ -1189,6 +1196,7 @@ fn draw_tool_overlays(app: &mut DesignApp, painter: &egui::Painter, xf: &Xf) {
         let r = xf.rect(designcraft_geom::Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0));
         painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5, Color32::from_rgb(230, 40, 40)), egui::StrokeKind::Middle);
     }
+    let tok = Tokens::get(painter.ctx());
     let ov = app.session.overlays(app.view_info());
     for o in ov {
         match o {
@@ -1206,10 +1214,10 @@ fn draw_tool_overlays(app: &mut DesignApp, painter: &egui::Painter, xf: &Xf) {
             }
             Overlay::Measure { p, text } => {
                 let s = xf.to_screen(p) + vec2(14.0, 14.0);
-                let g = painter.layout_no_wrap(text, egui::FontId::proportional(11.0), Color32::WHITE);
+                let g = painter.layout_no_wrap(text, egui::FontId::proportional(11.0), tok.measure_text);
                 let r = Rect::from_min_size(s, g.size() + vec2(10.0, 6.0));
-                painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(70, 70, 70, 230));
-                painter.galley(r.min + vec2(5.0, 3.0), g, Color32::WHITE);
+                painter.rect_filled(r, 3.0, tok.measure_bg);
+                painter.galley(r.min + vec2(5.0, 3.0), g, tok.measure_text);
             }
             Overlay::Line { a, b, color, dashed: d } => {
                 let st = Stroke::new(1.0, c32(color));
@@ -1220,7 +1228,16 @@ fn draw_tool_overlays(app: &mut DesignApp, painter: &egui::Painter, xf: &Xf) {
                 }
             }
             Overlay::Guide { a, b } => {
-                painter.line_segment([xf.to_screen(a), xf.to_screen(b)], Stroke::new(1.0, Color32::from_rgb(0, 200, 83)));
+                painter.line_segment([xf.to_screen(a), xf.to_screen(b)], Stroke::new(1.0, tok.smart_guide));
+            }
+            Overlay::Gap { a, b, label } => {
+                let (a, b) = (xf.to_screen(a), xf.to_screen(b));
+                painter.line_segment([a, b], Stroke::new(1.0, tok.smart_guide));
+                let s = a + (b - a) * 0.5;
+                let g = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), tok.measure_text);
+                let r = Rect::from_min_size(s, g.size() + vec2(10.0, 6.0));
+                painter.rect_filled(r, 3.0, tok.measure_bg);
+                painter.galley(r.min + vec2(5.0, 3.0), g, tok.measure_text);
             }
             Overlay::Path { .. } => {}
         }
@@ -1335,9 +1352,10 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         }
     }
     // Space-drag = hand (unless a tool drag is under way: then Space is a modifier, e.g. Live
-    // Distribute while resizing).
+    // Distribute while resizing). Middle-drag pans too, with any tool; tools only
+    // see the primary button.
     let tool_drag: bool = ui.data(|d| d.get_temp(egui::Id::new(("canvas_pointer_down", app.pane)))).unwrap_or(false);
-    if space && !tool_drag && resp.dragged() {
+    if !tool_drag && ((space && resp.dragged()) || resp.dragged_by(egui::PointerButton::Middle)) {
         let d = xf.unrotate_delta(resp.drag_delta());
         if let Some(v) = app.view_mut() {
             v.origin = Point::new(v.origin.x - d.x as f64 / v.zoom, v.origin.y - d.y as f64 / v.zoom);
@@ -1475,7 +1493,7 @@ fn draw_hidden_characters(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc
         let cs = app.session.cache.get(doc, story.id, None);
         for ft in &cs.frames {
             let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { continue };
-            let m = a * it.text_xf();
+            let m = a * doc.text_xf(it);
             let col = layer_color(doc, it);
             for l in &ft.lines {
                 let size = (l.ascent * 0.75 * xf.zoom).clamp(6.0, 40.0) as f32;
@@ -1543,7 +1561,7 @@ fn draw_dynamic_spelling(app: &DesignApp, ctx: &egui::Context, painter: &egui::P
         let red = Stroke::new(1.0, Color32::from_rgb(230, 30, 30));
         for ft in &cs.frames {
             let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { continue };
-            let m = a * it.text_xf();
+            let m = a * doc.text_xf(it);
             for l in &ft.lines {
                 for r in bad.iter().filter(|r| r.start < l.range.end && r.end > l.range.start) {
                     let gs: Vec<_> = l.glyphs.iter().filter(|g| g.len > 0 && g.byte >= r.start && g.byte < r.end).collect();

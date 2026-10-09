@@ -20,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create Frame",
             [],
             None,
-            "{spread?, rect: [x0,y0,x1,y1] (spread coords), shape?: rectangle|ellipse|polygon, content?: graphic|text|unassigned, sides?: 6, text?: string, caret?: bool}",
+            "{spread?, rect: [x0,y0,x1,y1] (spread coords), shape?: rectangle|ellipse|polygon, content?: graphic|text|unassigned, sides?: 6, text?: string, caret?: bool, vertical?: bool (text: a new vertical story)}",
             has_doc,
             frame_create
         ),
@@ -114,12 +114,12 @@ pub fn specs() -> Vec<CommandSpec> {
             "Transform Panel",
             [],
             None,
-            "{x?, y?, width?, height?, scaleX? (%), scaleY? (%), rotation? (°), shear? (°), ref?: 0..8} — reference-point based geometry; rotation and shear are absolute (Transformations are Totals decides whether nested objects measure them on the pasteboard)",
+            "{x?, y?, width?, height?, scaleX? (%), scaleY? (%), rotation? (°), shear? (°), ref?: 0..8, ids?} — reference-point based geometry; rotation and shear are absolute (Transformations are Totals decides whether nested objects measure them on the pasteboard)",
             has_selection,
             transform_set
         ),
         cmd!(query "transform.info", "Transform Values", [], None, "{ids?} → {scaleX, scaleY (%), rotation, shear (°), content?: the same for a placed graphic} of the first target", has_selection, transform_info),
-        cmd!("object.arrange", "Arrange", ["Object", "Arrange"], None, "{to: front|forward|backward|back}", has_selection, arrange),
+        cmd!("object.arrange", "Arrange", ["Object", "Arrange"], None, "{to: front|forward|backward|back, ids?}", has_selection, arrange),
         cmd!("object.bringToFront", "Bring to Front", ["Object", "Arrange"], Some("Cmd+Shift+]"), "{}", has_selection, |s, _| s
             .execute("object.arrange", &json!({"to": "front"}))),
         cmd!("object.bringForward", "Bring Forward", ["Object", "Arrange"], Some("Cmd+]"), "{}", has_selection, |s, _| s
@@ -479,7 +479,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r], verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, vertical?: bool (Vertical Type), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r], verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -555,7 +555,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Step and Repeat…",
             ["Edit"],
             Some("Cmd+Alt+U"),
-            "{count?: 1, dx?, dy?, rows?, columns?} — copies of the selection offset by (dx, dy); with rows/columns, a grid",
+            "{count?: 1, dx?, dy?, rows?, columns?, ids?} — copies of the selection (or ids) offset by (dx, dy); with rows/columns, a grid",
             has_selection,
             step_and_repeat
         ),
@@ -795,7 +795,7 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
     let content = str_param(p, "content").unwrap_or("graphic");
     let sr = spread_param(p, "spread");
     let lid = s.doc()?.active_layer;
-    let text = str_param(p, "text").unwrap_or("").to_string();
+    let text = super::text_param(p, "text");
     let caret = bool_or(p, "caret", content == "text");
     let vertical = bool_or(p, "vertical", false);
     let sides = p.get("sides").and_then(Value::as_u64).map_or(s.prefs.polygon_sides, |v| v as u32).clamp(3, 100);
@@ -815,10 +815,8 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(it) = d.item_mut(id) {
                 it.path = path;
                 it.shape = sh;
-                if vertical && let Some(tf) = it.text_frame_mut() {
-                    tf.options.vertical = true;
-                }
             }
+            super::text::set_story_direction(d, &[sid], vertical);
             *sel = if caret {
                 Selection::text(TextSel { story: sid, anchor: text.len(), focus: text.len(), frame: Some(id), cell: None })
             } else {
@@ -1452,15 +1450,17 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(v) = p.get("ignoreWrap").and_then(Value::as_bool) {
                 o.ignore_wrap = v;
             }
-            if let Some(v) = p.get("vertical").and_then(Value::as_bool) {
-                o.vertical = v;
-            }
             if let Some(v) = p.get("balanceColumns").and_then(Value::as_bool) {
                 o.balance_columns = v;
             }
             if let Some(v) = p.get("columnRule").and_then(Value::as_bool) {
                 o.column_rule = v;
             }
+        }
+        // Story direction belongs to the story: every frame of the thread turns.
+        if let Some(v) = p.get("vertical").and_then(Value::as_bool) {
+            let stories: Vec<StoryId> = ids.iter().filter_map(|id| d.item(*id).and_then(Item::text_frame).map(|t| t.story)).collect();
+            super::text::set_story_direction(d, &stories, v);
         }
         Ok(json!({"changed": ids.len()}))
     })
@@ -2367,5 +2367,57 @@ mod gap_tests {
         assert_eq!((bb(&s, a).x1, bb(&s, b).x0), (230.0, 250.0), "the gap moved, its width kept");
         assert_eq!(bb(&s, b).x1, 320.0);
         assert!(s.execute("gap.move", &json!({"at": [150, 200], "delta": 5})).is_err(), "inside an object");
+    }
+}
+
+#[cfg(test)]
+mod line_end_tests {
+    use super::*;
+
+    /// "One\rTwo" made one paragraph (the CR stayed in the text) instead of two.
+    #[test]
+    fn carriage_returns_separate_paragraphs() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 300], "content": "text", "text": "One\rTwo\r\nThree"})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        let story = |s: &Session| s.doc().unwrap().doc.story(sid).unwrap().clone();
+        assert_eq!(story(&s).text, "One\nTwo\nThree");
+        assert_eq!(story(&s).paras.len(), 3);
+        // The caret is at the end: typed text gets the same treatment.
+        s.execute("text.insert", &json!({"text": "\rFour", "raw": true})).unwrap();
+        assert_eq!(story(&s).text, "One\nTwo\nThree\nFour");
+        assert_eq!(story(&s).paras.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod named_target_tests {
+    use super::*;
+
+    /// With a text caret (or nothing) selected, a command given `ids` failed
+    /// with "command `object.textFrameOptions` is not available right now: nothing selected".
+    #[test]
+    fn ids_act_without_a_selection() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 300], "content": "text", "text": "Hello"})).unwrap();
+        assert!(s.doc().unwrap().selection.items.is_empty(), "frame.create leaves a text caret");
+        let e = s.execute("object.textFrameOptions", &json!({"columns": 2})).unwrap_err().to_string();
+        assert!(e.contains("nothing selected"), "{e}");
+        s.execute("object.textFrameOptions", &json!({"ids": [r["id"]], "columns": 2})).unwrap();
+        let id = ItemId(r["id"].as_u64().unwrap());
+        let columns = |s: &Session| s.doc().unwrap().doc.item(id).and_then(|i| i.text_frame().map(|t| t.options.columns));
+        assert_eq!(columns(&s), Some(2));
+        s.execute("transform.set", &json!({"id": r["id"], "x": 100, "ref": 0})).unwrap();
+        let e = s.execute("object.textFrameOptions", &json!({"ids": [99999], "columns": 1})).unwrap_err().to_string();
+        assert!(e.contains("no object with id 99999"), "{e}");
+        assert_eq!(columns(&s), Some(2));
+        // An empty `ids` names nothing (as `targets` reads it), even beside an `id`.
+        let e = s.execute("object.textFrameOptions", &json!({"ids": [], "id": r["id"], "columns": 3})).unwrap_err().to_string();
+        assert!(e.contains("nothing selected"), "{e}");
+        assert_eq!(columns(&s), Some(2));
+        // Commands documented with `ids` honour `id` too.
+        assert_eq!(s.execute("conveyor.collect", &json!({"id": r["id"]})).unwrap()["count"], 1);
     }
 }

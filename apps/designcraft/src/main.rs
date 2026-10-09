@@ -5,6 +5,7 @@
 //! `--control <port>` (or `DESIGNCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
 //! `{"id":1,"method":"ui.inspect","params":{}}` → `{"id":1,"ok":true,"result":…}`.
 //! See `designcraft_ui_egui::control` for the methods.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod control_server;
@@ -88,65 +89,78 @@ fn save_prefs(app: &DesignApp) {
     }
 }
 
+/// One file-type row in an open dialog. `open_filters` is what `pick_open` applies.
+struct OpenFilter {
+    name: &'static str,
+    extensions: &'static [&'static str],
+}
+
+fn open_filters(purpose: &str) -> &'static [OpenFilter] {
+    match purpose {
+        "swatches" => &[OpenFilter { name: "Swatch Exchange (ASE)", extensions: &["ase"] }],
+        "script" => &[OpenFilter { name: "Script", extensions: &["dcscript", "txt", "json"] }],
+        "icc" => &[OpenFilter { name: "ICC profile", extensions: &["icc", "icm"] }],
+        "book" => &[OpenFilter { name: "Book", extensions: &["dcbook"] }],
+        "xml" => &[OpenFilter { name: "XML", extensions: &["xml"] }],
+        "library" => &[OpenFilter { name: "Object Library", extensions: &["dclib"] }],
+        "dataMerge" => &[OpenFilter { name: "Data source (CSV, TSV, text, Excel)", extensions: &["csv", "tsv", "tab", "txt", "xlsx"] }],
+        "place" => &[
+            OpenFilter {
+                name: "Graphics and text",
+                extensions: &[
+                    "png",
+                    "jpg",
+                    "jpeg",
+                    "gif",
+                    "webp",
+                    "tif",
+                    "tiff",
+                    "bmp",
+                    "psd",
+                    "svg",
+                    "pdf",
+                    "ai",
+                    "eps",
+                    "txt",
+                    "docx",
+                    "rtf",
+                    "md",
+                    "xlsx",
+                    "idml",
+                    "designcraft",
+                    "mp4",
+                    "m4v",
+                    "mov",
+                    "webm",
+                    "mp3",
+                    "m4a",
+                    "wav",
+                    "ogg",
+                ],
+            },
+            OpenFilter {
+                name: "Graphics",
+                extensions: &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "psd", "svg", "pdf", "ai", "eps"],
+            },
+            OpenFilter { name: "Text (Word, RTF, plain, Excel)", extensions: &["docx", "rtf", "txt", "md", "xlsx"] },
+            OpenFilter { name: "Video and sound", extensions: &["mp4", "m4v", "mov", "webm", "mp3", "m4a", "wav", "ogg"] },
+        ],
+        _ => &[
+            OpenFilter { name: "DesignCraft or IDML", extensions: &["designcraft", "idml"] },
+            OpenFilter { name: "DesignCraft", extensions: &["designcraft"] },
+            OpenFilter { name: "InDesign Markup (IDML)", extensions: &["idml"] },
+        ],
+    }
+}
+
 fn services() -> Services {
     Services {
         pick_open: Some(Box::new(|purpose: &str| {
-            let d = rfd::FileDialog::new();
-            let d = if purpose == "swatches" {
-                d.add_filter("Swatch Exchange (ASE)", &["ase"])
-            } else if purpose == "script" {
-                d.add_filter("Script", &["dcscript", "txt", "json"])
-            } else if purpose == "icc" {
-                d.add_filter("ICC profile", &["icc", "icm"])
-            } else if purpose == "book" {
-                d.add_filter("Book", &["dcbook"])
-            } else if purpose == "xml" {
-                d.add_filter("XML", &["xml"])
-            } else if purpose == "library" {
-                d.add_filter("Object Library", &["dclib"])
-            } else if purpose == "place" {
-                d.add_filter(
-                    "Graphics and text",
-                    &[
-                        "png",
-                        "jpg",
-                        "jpeg",
-                        "gif",
-                        "webp",
-                        "tif",
-                        "tiff",
-                        "bmp",
-                        "psd",
-                        "svg",
-                        "pdf",
-                        "ai",
-                        "eps",
-                        "txt",
-                        "docx",
-                        "rtf",
-                        "md",
-                        "xlsx",
-                        "idml",
-                        "designcraft",
-                        "mp4",
-                        "m4v",
-                        "mov",
-                        "webm",
-                        "mp3",
-                        "m4a",
-                        "wav",
-                        "ogg",
-                    ],
-                )
-                .add_filter("Graphics", &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "psd", "svg", "pdf", "ai", "eps"])
-                .add_filter("Text (Word, RTF, plain, Excel)", &["docx", "rtf", "txt", "md", "xlsx"])
-                .add_filter("Video and sound", &["mp4", "m4v", "mov", "webm", "mp3", "m4a", "wav", "ogg"])
-            } else {
-                d.add_filter("DesignCraft or IDML", &["designcraft", "idml"])
-                    .add_filter("DesignCraft", &["designcraft"])
-                    .add_filter("InDesign Markup (IDML)", &["idml"])
-            };
-            d.pick_file().map(|p| p.to_string_lossy().to_string())
+            let mut dialog = rfd::FileDialog::new();
+            for filter in open_filters(purpose) {
+                dialog = dialog.add_filter(filter.name, filter.extensions);
+            }
+            dialog.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
@@ -202,7 +216,7 @@ fn main() -> eframe::Result {
     // winit has no file drag-and-drop on Wayland (only on X11), so dropping images from the file
     // manager showed a "no" cursor. Run through XWayland when it's there; DESIGNCRAFT_WAYLAND=1
     // keeps the native Wayland backend.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(unix, not(target_os = "macos")))]
     if std::env::var_os("DISPLAY").is_some() && std::env::var_os("DESIGNCRAFT_WAYLAND").is_none() {
         options.event_loop_builder = Some(Box::new(|b| {
             use winit::platform::x11::EventLoopBuilderExtX11;
@@ -242,4 +256,22 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn data_merge_open_dialog_lists_table_extensions() {
+        let filters = super::open_filters("dataMerge");
+        let exts: Vec<&str> = filters.iter().flat_map(|filter| filter.extensions.iter().copied()).collect();
+        for ext in ["csv", "tsv", "tab", "txt", "xlsx"] {
+            assert!(exts.contains(&ext), "{ext} is missing from the dataMerge dialog: {exts:?}");
+        }
+        assert!(!exts.iter().any(|ext| *ext == "designcraft" || *ext == "idml"), "dataMerge must not fall through to the document filters: {exts:?}");
+        let place = super::open_filters("place");
+        assert!(place.len() > 1, "the place dialog keeps a filter for each kind of file");
+        assert!(place.iter().any(|filter| filter.extensions.contains(&"png")));
+        let documents = super::open_filters("");
+        assert!(documents.iter().any(|filter| filter.extensions.contains(&"designcraft")));
+    }
 }

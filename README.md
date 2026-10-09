@@ -54,6 +54,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#web">Web</a> ·
   <a href="#architecture">Architecture</a> ·
+  <a href="#downloads">Downloads</a> ·
   <a href="#the-crafting-apps">The Crafting Apps</a> ·
   <a href="#license-and-credits">License and credits</a>
 </p>
@@ -105,6 +106,19 @@ cargo run --release -p designcraft-cli -- commands         # list every command
 cargo xtask ci                                             # fmt, clippy, tests, assets, layering, wasm
 ```
 
+Japanese text (UI and documents) uses fonts from
+[storytold/craft-fonts](https://github.com/storytold/craft-fonts), an optional build input (font
+files are never committed here; see craftrules
+[`standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md)):
+
+```sh
+git clone https://github.com/storytold/craft-fonts ../craft-fonts
+CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run --release -p designcraft   # absolute path
+```
+
+Without it, Japanese falls back to the system's fonts (none on the web). Release builds always
+include it.
+
 To drive a running app, send JSON lines to `127.0.0.1:7979`. The protocol is described in
 [`docs/control-protocol.md`](docs/control-protocol.md).
 
@@ -141,6 +155,51 @@ egui frontend is a separate crate, so the UI can be swapped without touching the
 - **Bundled assets:** every one is listed with its licence in [`ASSETS.md`](ASSETS.md)
 - **App icon and colour:** a calico cat in a polka-dot scarf on DesignCraft green `#7bb51c`; see [`assets/app-icon/`](assets/app-icon/README.md)
 
+## Downloads
+
+**New to DesignCraft?** Download it from the [DesignCraft page on getartcraft.com](https://getartcraft.com/apps/designcraft). That's the easiest way to install it.
+
+**Want a specific build or format?** On GitHub, the [latest release](https://github.com/storytold/designcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/designcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
+
+### Windows
+
+| Build | Installer | Portable |
+|---|---|---|
+| x64 (64-bit Intel/AMD) | `designcraft-<ver>-windows-x64.msi` | `designcraft-<ver>-windows-x64-portable.zip` |
+| arm64 (Snapdragon and other ARM PCs) | `designcraft-<ver>-windows-arm64.msi` | `designcraft-<ver>-windows-arm64-portable.zip` |
+| x86 (32-bit) | `designcraft-<ver>-windows-x86.msi` | `designcraft-<ver>-windows-x86-portable.zip` |
+
+Installers and executables are code-signed.
+
+### macOS
+
+| Build | File | Notes |
+|---|---|---|
+| App, universal (Apple silicon + Intel) | `designcraft-<ver>-macos-universal.dmg` | Signed and notarized |
+| Command-line tool, universal | `designcraft-cli-<ver>-macos-universal.zip` | Signed and notarized |
+
+### Linux
+
+| Format | x86_64 | aarch64 (ARM64) | Notes |
+|---|---|---|---|
+| AppImage | `designcraft-<ver>-linux-x86_64.AppImage` | `designcraft-<ver>-linux-aarch64.AppImage` | Runs anywhere; updates itself with [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) (`.zsync` files) |
+| Flatpak | `designcraft-<ver>-linux-x86_64.flatpak` | `designcraft-<ver>-linux-aarch64.flatpak` | Sandboxed; `flatpak install --user <file>` |
+| Debian/Ubuntu | `designcraft-<ver>-linux-x86_64.deb` | `designcraft-<ver>-linux-aarch64.deb` | |
+| Fedora/RHEL/openSUSE | `designcraft-<ver>-linux-x86_64.rpm` | `designcraft-<ver>-linux-aarch64.rpm` | |
+| Tarball | `designcraft-<ver>-linux-x86_64.tar.gz` | `designcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
+
+### FreeBSD
+
+| Build | File |
+|---|---|
+| x86_64 | `designcraft-<ver>-freebsd-x86_64.tar.gz` |
+
+### Web (WebAssembly)
+
+| Build | File | Notes |
+|---|---|---|
+| Static site | `designcraft-web-<ver>.zip` | Runs in a modern browser; host it on any static server |
+
 ## The Crafting Apps
 
 DesignCraft is one of the **Crafting Apps**: free, open-source creative tools from the
@@ -153,7 +212,7 @@ stand on its own.
 | <img src="https://raw.githubusercontent.com/storytold/vectorcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.vectorcraft.png" alt="" width="32" height="32"> | **VectorCraft** | Vector illustration | [GitHub](https://github.com/storytold/vectorcraft) | [Website](https://getartcraft.com/apps/vectorcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/filmcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.filmcraft.png" alt="" width="32" height="32"> | **FilmCraft** | Video editing, color and sound | [GitHub](https://github.com/storytold/filmcraft) | [Website](https://getartcraft.com/apps/filmcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/lightcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png" alt="" width="32" height="32"> | **LightCraft** | Photo library and raw development | [GitHub](https://github.com/storytold/lightcraft) | [Website](https://getartcraft.com/apps/lightcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/printcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.printcraft.png" alt="" width="32" height="32"> | **PrintCraft** | Reading, organizing and protecting PDFs | [GitHub](https://github.com/storytold/printcraft) | [Website](https://getartcraft.com/apps/printcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/pdfcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.pdfcraft.png" alt="" width="32" height="32"> | **PdfCraft** | Reading, organizing and protecting PDFs | [GitHub](https://github.com/storytold/pdfcraft) | [Website](https://getartcraft.com/apps/pdfcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/effectcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.effectcraft.png" alt="" width="32" height="32"> | **EffectCraft** | Motion graphics and visual effects | [GitHub](https://github.com/storytold/effectcraft) | [Website](https://getartcraft.com/apps/effectcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/designcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.designcraft.png" alt="" width="32" height="32"> | **DesignCraft** | **Page layout and publishing · you are here** | [GitHub](https://github.com/storytold/designcraft) | [Website](https://getartcraft.com/apps/designcraft) |
 
@@ -189,7 +248,8 @@ Copyright (c) 2026 ArtCraft Team and the DesignCraft contributors. Required noti
 Bundled fonts, icons, images and other assets keep their own open licenses; each one is listed
 with its author, source and license in [ASSETS.md](ASSETS.md).
 
-The bundled fonts are under the SIL Open Font License; all UI icons are drawn in code and are original.
+The bundled fonts, and the craft-fonts fonts embedded by release builds, are under the SIL Open
+Font License; all UI icons are drawn in code and are original.
 
 The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are trademarks of the
 ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as

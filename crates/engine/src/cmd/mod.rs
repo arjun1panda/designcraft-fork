@@ -113,9 +113,12 @@ pub fn always(_: &Session) -> std::result::Result<(), String> {
 pub fn has_doc(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".into())
 }
+/// Why [`has_selection`] disables a command. A command that documents `ids` still runs when the
+/// call names its objects (see [`named_targets`]).
+pub const NOTHING_SELECTED: &str = "nothing selected";
 pub fn has_selection(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
-    if s.active().is_some_and(|d| !d.selection.items.is_empty()) { Ok(()) } else { Err("nothing selected".into()) }
+    if s.active().is_some_and(|d| !d.selection.items.is_empty()) { Ok(()) } else { Err(NOTHING_SELECTED.into()) }
 }
 pub fn has_text(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
@@ -230,6 +233,12 @@ pub(crate) fn bool_or(p: &Value, key: &str, default: bool) -> bool {
 pub(crate) fn str_param<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
     p.get(key).and_then(Value::as_str)
 }
+/// Plain text from a parameter, with CR LF and lone CR (classic Mac and InDesign line ends) as
+/// `\n`, the paragraph separator, as edit.paste and text import already do. Kept as they were,
+/// the CRs joined the paragraphs into one.
+pub(crate) fn text_param(p: &Value, key: &str) -> String {
+    str_param(p, key).unwrap_or("").replace("\r\n", "\n").replace('\r', "\n")
+}
 pub(crate) fn id_param(p: &Value, key: &str) -> Option<ItemId> {
     p.get(key).and_then(Value::as_u64).map(ItemId)
 }
@@ -254,6 +263,19 @@ pub(crate) fn spread_param(p: &Value, key: &str) -> SpreadRef {
     }
 }
 
+/// The objects a call names with a non-empty `ids` or an `id`, for a command whose params
+/// document `ids` (it acts on [`targets`]). `None` when the call names none.
+pub(crate) fn named_targets(spec: &CommandSpec, p: &Value) -> Option<Vec<ItemId>> {
+    if !spec.params.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "ids") {
+        return None;
+    }
+    // As `targets` reads them: `ids`, when given, wins over `id` (an empty list names nothing).
+    if let Some(ids) = ids_param(p, "ids") {
+        return (!ids.is_empty()).then_some(ids);
+    }
+    id_param(p, "id").map(|i| vec![i])
+}
+
 /// Targets: `ids` / `id` params or the selection.
 pub(crate) fn targets(s: &Session, p: &Value) -> Result<Vec<ItemId>> {
     if let Some(ids) = ids_param(p, "ids") {
@@ -275,5 +297,7 @@ pub fn file_bytes(d: &designcraft_doc::Document) -> Vec<u8> {
 pub fn file_from(b: &[u8]) -> Result<designcraft_doc::Document> {
     file::from_bytes(b)
 }
+pub(crate) use datamerge::sync_placeholders;
+pub(crate) use file::load_document_fonts;
 pub use file::{base64_decode, base64_encode, from_bytes, to_bytes};
 pub(crate) use place_text::autoflow as place_text_autoflow;

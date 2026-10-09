@@ -10,6 +10,7 @@ pub mod about;
 pub mod canvas;
 pub mod chrome;
 pub mod control;
+pub mod credits;
 pub mod dialogs;
 pub mod dock;
 pub mod i18n;
@@ -17,6 +18,7 @@ pub mod icons;
 pub mod menus;
 pub mod panels;
 pub mod render_worker;
+mod rtl;
 pub mod story_editor;
 pub mod taskbar;
 pub mod theme;
@@ -26,7 +28,7 @@ pub mod widgets;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 
-use designcraft_engine::{Session, UiRequest, ViewInfo};
+use designcraft_engine::{Session, SnapView, UiRequest, ViewInfo};
 use designcraft_geom::{Point, Unit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -86,6 +88,16 @@ pub struct SavedWorkspace {
     pub floating: Vec<(String, [f32; 2])>,
 }
 
+/// A missing on-by-default bool stays on. `bool::default` is false.
+fn default_true() -> bool {
+    true
+}
+
+/// A missing snap zone stays at the factory width, in screen pixels.
+fn default_zone() -> f64 {
+    4.0
+}
+
 /// Persisted UI state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -122,7 +134,7 @@ pub struct UiState {
     pub dynamic_spelling: bool,
     /// Preferences › Story Editor Display: text size (points).
     pub story_editor_size: f32,
-    /// Edit › Interface Language: "" (English), "de", "fr", "es" or "ja".
+    /// Edit › Interface Language: supported codes are listed in `i18n::LANGUAGES`.
     pub language: String,
     /// Edit › Transparency Flattener Presets: "" (none), "high", "medium" or "low" for PDF export.
     pub flattener: String,
@@ -162,10 +174,26 @@ pub struct UiState {
     pub text_style_tab: u8,
     pub guides_locked: bool,
     pub smart_guides: bool,
+    #[serde(default = "default_true")]
+    pub snap_to_guides: bool,
+    pub snap_to_document_grid: bool,
+    #[serde(default = "default_true")]
+    pub align_edges: bool,
+    #[serde(default = "default_true")]
+    pub align_centers: bool,
+    #[serde(default = "default_true")]
+    pub smart_dimensions: bool,
+    #[serde(default = "default_true")]
+    pub smart_spacing: bool,
+    #[serde(default = "default_zone")]
+    pub snap_zone: f64,
     /// Window > Contextual Task Bar.
     pub task_bar: bool,
     /// Help › About DesignCraft is open.
     pub about: bool,
+    /// The About window's tab: 0 About, 1 Contributors, 2 Models (`about::ABOUT_TABS`).
+    #[serde(skip)]
+    pub about_tab: u8,
     /// URLs to open in the browser on the next frame (Help links, About, start screen).
     pub pending_urls: Vec<String>,
     #[serde(skip)]
@@ -228,13 +256,38 @@ impl Default for UiState {
             text_style_tab: 0,
             guides_locked: false,
             smart_guides: true,
+            snap_to_guides: true,
+            snap_to_document_grid: false,
+            align_edges: true,
+            align_centers: true,
+            smart_dimensions: true,
+            smart_spacing: true,
+            snap_zone: 4.0,
             task_bar: true,
             about: false,
+            about_tab: 0,
             pending_urls: Vec::new(),
             status: String::new(),
             dialog: None,
             palette: None,
             flyout: None,
+        }
+    }
+}
+
+impl UiState {
+    /// Copies the live view switches into the snap engine's view.
+    pub fn snap_view(&self) -> SnapView {
+        SnapView {
+            snap_to_guides: self.snap_to_guides,
+            snap_to_document_grid: self.snap_to_document_grid,
+            show_guides: self.guides,
+            smart_guides: self.smart_guides,
+            align_edges: self.align_edges,
+            align_centers: self.align_centers,
+            smart_dimensions: self.smart_dimensions,
+            smart_spacing: self.smart_spacing,
+            zone_px: self.snap_zone,
         }
     }
 }
@@ -353,6 +406,8 @@ pub struct DesignApp {
     queued_shots: Vec<(u64, f64, u32)>,
     shot_token: u64,
     styled: bool,
+    /// The interface language the UI fonts were installed for (it orders the CJK fallbacks).
+    fonts_lang: String,
     pub restyle: bool,
     fonts_ready: bool,
     pub integrated_titlebar: bool,
@@ -367,6 +422,8 @@ pub struct DesignApp {
 
 impl DesignApp {
     pub fn new(session: Session, services: Services) -> Self {
+        // The font menus and the first file opened need the installed fonts: catalog them now.
+        designcraft_fonts::FontDb::global().scan_in_background();
         DesignApp {
             session,
             ui: UiState::default(),
@@ -389,6 +446,7 @@ impl DesignApp {
             queued_shots: vec![],
             shot_token: 0,
             styled: false,
+            fonts_lang: String::new(),
             restyle: false,
             fonts_ready: false,
             integrated_titlebar: false,
@@ -427,7 +485,7 @@ impl DesignApp {
         self.pane = pane;
     }
     pub fn view_info(&self) -> ViewInfo {
-        ViewInfo { zoom: self.view().map(|v| v.zoom).unwrap_or(1.0) }
+        ViewInfo { zoom: self.view().map(|v| v.zoom).unwrap_or(1.0), snap: self.ui.snap_view(), unit: self.ui.units }
     }
 
     pub fn status(&mut self, s: impl Into<String>) {
@@ -533,10 +591,15 @@ impl DesignApp {
             ctx.set_zoom_factor(scale);
         }
         if !self.styled {
-            theme::install_fonts(ctx);
+            theme::install_fonts(ctx, &self.ui.language);
+            self.fonts_lang = self.ui.language.clone();
             self.styled = true;
             self.restyle = true;
         } else {
+            if self.fonts_lang != self.ui.language {
+                theme::install_fonts(ctx, &self.ui.language);
+                self.fonts_lang = self.ui.language.clone();
+            }
             self.fonts_ready = true;
         }
         if self.restyle {
@@ -802,5 +865,22 @@ pub fn now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_view_uses_the_saved_switches() {
+        let mut ui = UiState::default();
+        assert!(ui.snap_view().snap_to_guides);
+        assert!(!ui.snap_view().snap_to_document_grid);
+        assert_eq!(ui.snap_view().zone_px, 4.0);
+        ui.snap_to_guides = false;
+        ui.snap_zone = 0.0;
+        assert!(!ui.snap_view().snap_to_guides);
+        assert_eq!(ui.snap_view().zone_px, 0.0);
     }
 }
