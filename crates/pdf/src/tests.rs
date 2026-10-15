@@ -202,6 +202,18 @@ fn tables_export_cell_text() {
     }
 }
 
+#[test]
+fn drop_cap_text_extracts_in_order() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let para = designcraft_doc::ParaAttrs { drop_cap_lines: Some(3), drop_cap_chars: Some(2), ..Default::default() };
+    let text = "Drop caps read in order with the rest of the paragraph, which runs on for a few lines beside the enlarged letters.";
+    d.add_text_frame(SpreadRef::Doc(0), Rect::new(36.0, 36.0, 236.0, 300.0), lid, text, ParaFormat { para, ..Default::default() }).unwrap();
+    let bytes = export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+    let flat: String = extract_text(&bytes)[0].split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.starts_with("Drop caps read in order"), "{flat}");
+}
+
 /// A 4×2 CMYK TIFF: the left half 100% K (text in a scan), the right half C0 M100 Y100 K0.
 fn cmyk_tiff() -> (Vec<u8>, Vec<u8>) {
     let (k, red) = ([0u8, 0, 0, 255], [0u8, 255, 255, 0]);
@@ -240,6 +252,45 @@ fn place(d: &mut Document, data: Vec<u8>, px: (u32, u32)) {
     d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
 }
 
+/// A placed image whose linked file wasn't found has no data: the warning says it is missing,
+/// not that it could not be decoded.
+#[test]
+fn a_missing_linked_image_is_reported_as_missing() {
+    let mut d = doc_with_text("still here");
+    place(&mut d, Vec::new(), (64, 64));
+    if let Some(a) = d.assets.values_mut().next() {
+        std::sync::Arc::make_mut(a).link = Some("/gone/curtains.jpeg".into());
+    }
+    let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("is missing (/gone/curtains.jpeg) and was skipped")), "{:?}", r.warnings);
+    assert!(!r.warnings.iter().any(|w| w.contains("could not be decoded")), "{:?}", r.warnings);
+}
+
+/// krilla reads PNG, GIF and WebP lazily, so a damaged one passed the exporter's "does it decode"
+/// check and failed the whole export when the PDF was written ("PDF writer error: … unexpected
+/// end of file"). A cut-off download must be skipped with a warning, as a damaged TIFF is.
+#[test]
+fn a_cut_off_image_is_skipped_not_fatal() {
+    let px = image::RgbaImage::from_fn(64, 64, |x, y| image::Rgba([(x * 37 + y * 11) as u8, (x * 5) as u8, (y * 91) as u8, 255]));
+    for format in [image::ImageFormat::Png, image::ImageFormat::Gif, image::ImageFormat::WebP] {
+        let mut whole = Vec::new();
+        px.write_to(&mut std::io::Cursor::new(&mut whole), format).unwrap();
+        let cut = whole[..whole.len() * 9 / 10].to_vec();
+        let mut d = doc_with_text("still here");
+        place(&mut d, cut, (64, 64));
+        let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions::default()).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+        assert!(r.warnings.iter().any(|w| w.contains("could not be decoded and was skipped")), "{format:?}: {:?}", r.warnings);
+        assert!(image_xobjects(&r.bytes).is_empty(), "{format:?}");
+        assert!(extract_text(&r.bytes).concat().contains("still"), "{format:?}: the rest of the page is exported");
+        // The undamaged file still goes in.
+        let mut d = doc_with_text("x");
+        place(&mut d, whole, (64, 64));
+        let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+        assert!(r.warnings.is_empty(), "{format:?}: {:?}", r.warnings);
+        assert_eq!(image_xobjects(&r.bytes).len(), 1, "{format:?}");
+    }
+}
+
 /// Every image XObject in a PDF: its /ColorSpace name (`?` when not a name) and decoded samples.
 fn image_xobjects(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     use hayro_syntax::object::Name;
@@ -268,6 +319,55 @@ fn cmyk_tiff_keeps_its_inks() {
         let images = image_xobjects(&r.bytes);
         assert_eq!(images, vec![("DeviceCMYK".to_string(), px.clone())], "{standard:?}");
         assert_eq!(images[0].1[..4], [0, 0, 0, 255], "K only");
+    }
+}
+
+/// An 8×8 raster encoded as `fmt`; `alpha` gives it a transparent corner.
+fn raster(fmt: image::ImageFormat, alpha: bool) -> Vec<u8> {
+    let img =
+        image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba([(x * 30) as u8, (y * 30) as u8, 128, if alpha && x == 0 && y == 0 { 0 } else { 255 }]));
+    let img = if fmt == image::ImageFormat::Jpeg {
+        image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(img).to_rgb8())
+    } else {
+        image::DynamicImage::ImageRgba8(img)
+    };
+    let mut b = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut b, fmt).unwrap();
+    b.into_inner()
+}
+
+/// Each image XObject's /Interpolate value (`None` when absent).
+fn interpolate_flags(bytes: &[u8]) -> Vec<Option<bool>> {
+    use hayro_syntax::object::Name;
+    let pdf = hayro_syntax::Pdf::new(bytes.to_vec()).expect("parse");
+    pdf.objects()
+        .into_iter()
+        .filter_map(|o| o.into_stream())
+        .filter(|s| s.dict().get::<Name>("Subtype").is_some_and(|n| n.as_str() == "Image"))
+        .map(|s| s.dict().get::<bool>("Interpolate"))
+        .collect()
+}
+
+/// PDF/A-2b rejected placed PNG, JPEG, GIF and WebP images (#71): they were written with
+/// /Interpolate true, which PDF/A forbids. Ordinary exports keep interpolation.
+#[test]
+fn archival_exports_keep_placed_images_without_interpolation() {
+    use image::ImageFormat as F;
+    let mut d = doc_with_text("x");
+    for (fmt, alpha) in [(F::Png, true), (F::Png, false), (F::Jpeg, false), (F::Gif, true), (F::WebP, true)] {
+        place(&mut d, raster(fmt, alpha), (8, 8));
+    }
+    for compress_images in [false, true] {
+        let opts = PdfOptions { compress_images, created: Some(1_700_000_000), ..Default::default() };
+        let a = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { standard: Standard::PdfA2b, ..opts.clone() });
+        let a = a.unwrap_or_else(|e| panic!("PDF/A-2b with images (compress {compress_images}): {e:?}"));
+        let flags = interpolate_flags(&a.bytes);
+        assert!(flags.len() >= 5, "every placed image is in the PDF/A file: {flags:?}");
+        assert!(flags.iter().all(|f| *f != Some(true)), "{flags:?}");
+        let plain = export_pdf(&d, &Cache::new(), &opts).unwrap();
+        let flags = interpolate_flags(&plain);
+        assert!(flags.len() >= 5, "{flags:?}");
+        assert!(flags.contains(&Some(true)), "ordinary exports interpolate: {flags:?}");
     }
 }
 
@@ -314,6 +414,93 @@ fn drawn(bytes: &[u8]) -> (Vec<(String, kurbo::Rect)>, Vec<kurbo::Rect>) {
     (rec.0, rec.1)
 }
 
+/// The page's paint operations in order: `fill`/`stroke` + ` text`/` path` and the stroke width.
+fn paint_order(bytes: &[u8]) -> Vec<(String, f32)> {
+    use hayro_interpret::font::Glyph;
+    use hayro_interpret::{
+        BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask,
+        interpret_page,
+    };
+    #[derive(Default)]
+    struct Rec(Vec<(String, f32)>);
+    impl Device<'_> for Rec {
+        fn set_soft_mask(&mut self, _: Option<SoftMask<'_>>) {}
+        fn set_blend_mode(&mut self, _: BlendMode) {}
+        fn draw_path(&mut self, _: &kurbo::BezPath, _: kurbo::Affine, _: &Paint<'_>, m: &PathDrawMode) {
+            self.0.push(match m {
+                PathDrawMode::Fill(_) => ("fill path".into(), 0.0),
+                PathDrawMode::Stroke(p) => ("stroke path".into(), p.line_width),
+            });
+        }
+        fn push_clip_path(&mut self, _: &ClipPath) {}
+        fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
+        fn draw_glyph(&mut self, _: &Glyph<'_>, _: kurbo::Affine, _: kurbo::Affine, _: &Paint<'_>, m: &GlyphDrawMode) {
+            self.0.push(match m {
+                GlyphDrawMode::Fill => ("fill text".into(), 0.0),
+                GlyphDrawMode::Stroke(p) => ("stroke text".into(), p.line_width),
+                GlyphDrawMode::Invisible => ("invisible text".into(), 0.0),
+            });
+        }
+        fn draw_image(&mut self, _: Image<'_, '_>, _: kurbo::Affine) {}
+        fn pop_clip_path(&mut self) {}
+        fn pop_transparency_group(&mut self) {}
+    }
+    let pdf = hayro_syntax::Pdf::new(bytes.to_vec()).expect("parse");
+    let cache = InterpreterCache::new();
+    let page = &pdf.pages()[0];
+    let mut ctx = Context::new(kurbo::Affine::IDENTITY, kurbo::Rect::new(0.0, 0.0, 1.0, 1.0), &cache, pdf.xref(), InterpreterSettings::default());
+    let mut rec = Rec::default();
+    interpret_page(page, &mut ctx, &mut rec);
+    rec.0
+}
+
+#[test]
+fn stroke_behind_fill_strokes_the_run_before_filling_it() {
+    let export = |behind: bool| {
+        let mut d = doc_with_text("I");
+        let sid = *d.stories.keys().next().unwrap();
+        d.story_mut(sid).unwrap().format_chars(0..1, |f| {
+            f.over.stroke = Some(designcraft_color::swatch::BLACK.into());
+            f.over.stroke_weight = Some(4.0);
+            f.over.stroke_behind_fill = Some(behind);
+        });
+        let bytes = export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+        let ops: Vec<(String, f32)> = paint_order(&bytes).into_iter().filter(|(op, w)| op.ends_with("text") || *w > 0.0).collect();
+        (ops, extract_text(&bytes)[0].clone())
+    };
+    let (over, _) = export(false);
+    assert_eq!(over, [("fill text".to_string(), 0.0), ("stroke text".to_string(), 4.0)]);
+    let (behind, text) = export(true);
+    assert_eq!(behind, [("stroke path".to_string(), 8.0), ("fill text".to_string(), 0.0)], "the double-width stroke goes first");
+    assert_eq!(text.trim(), "I", "the text is not duplicated");
+}
+
+#[test]
+fn pdfa_leaves_out_form_fields_added_after_validation() {
+    let mut d = doc_with_text("Archive me");
+    let lid = d.default_layer();
+    let id = ItemId(d.alloc());
+    let mut b = Item::new(id, lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(Rect::new(36.0, 400.0, 200.0, 430.0)));
+    b.form_field = Some(designcraft_doc::FormField {
+        kind: designcraft_doc::FieldKind::TextField,
+        name: "name".into(),
+        value: String::new(),
+        options: Vec::new(),
+        multiline: false,
+        required: false,
+        font_size: 0.0,
+    });
+    d.insert_item(SpreadRef::Doc(0), b, None).unwrap();
+    let plain = export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+    assert!(String::from_utf8_lossy(&plain).contains("/AcroForm"), "control: a plain export has the field");
+    let opts = PdfOptions { standard: Standard::PdfA2b, created: Some(1_700_000_000), ..Default::default() };
+    let a = export_pdf_with_report(&d, &Cache::new(), &opts).unwrap();
+    let text = String::from_utf8_lossy(&a.bytes).to_string();
+    assert!(text.contains("pdfaid"));
+    assert!(!text.contains("/AcroForm") && !text.contains("NeedAppearances"), "PDF/A must not get the form update");
+    assert!(a.warnings.iter().any(|w| w.contains("PDF/A-2b") && w.contains("left out")), "{:?}", a.warnings);
+}
+
 #[test]
 fn missing_glyphs_print_as_boxes() {
     // Source Serif 4 lacks 語: its .notdef box is drawn as a path, not as a .notdef glyph
@@ -336,4 +523,48 @@ fn missing_glyphs_print_as_boxes() {
     let (glyphs, paths) = drawn(&export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap());
     assert_eq!(glyphs.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(), ["a", "b"], "{glyphs:?}");
     assert_eq!(boxes(&paths), 1, "{paths:?}");
+}
+
+#[test]
+fn column_rules_are_drawn() {
+    let rules = |on: bool| {
+        let mut d = doc_with_text("Column text");
+        let fid = d.stories.values().next().unwrap().frames[0];
+        let o = &mut d.item_mut(fid).unwrap().text_frame_mut().unwrap().options;
+        o.columns = 3;
+        o.gutter = 12.0;
+        o.inset = [0.0; 4];
+        o.column_rule = on;
+        o.column_rule_weight = 2.0;
+        let (_, paths) = drawn(&export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap());
+        paths.into_iter().filter(|r| (r.width() - 2.0).abs() < 0.01 && (r.height() - 264.0).abs() < 0.01).map(|r| r.center().x).collect::<Vec<_>>()
+    };
+    // 540 pt wide in three columns with 12 pt gutters: columns of 172 pt from x 36.
+    let xs = rules(true);
+    assert_eq!(xs.len(), 2, "{xs:?}");
+    assert!((xs[0] - 214.0).abs() < 0.01 && (xs[1] - 398.0).abs() < 0.01, "{xs:?}");
+    assert!(rules(false).is_empty());
+}
+
+#[test]
+fn extreme_page_selection_is_a_page_error_without_overflow() {
+    let doc = doc_with_text("Bounded page selection");
+    let opts = PdfOptions { pages: Some(vec![usize::MAX]), ..Default::default() };
+    assert_eq!(export_pdf(&doc, &Cache::new(), &opts), Err(PdfError::BadPage(usize::MAX)));
+}
+
+#[test]
+fn empty_and_populated_export_metadata_preserve_key_presence() {
+    let mut d = Document::new(&NewDocument::default());
+    d.title.clear();
+    let s = uncompressed(&d, PdfOptions::default());
+    for key in ["/Title", "/Author", "<dc:title>", "<dc:creator>"] {
+        assert!(!s.contains(key), "unexpected empty metadata {key}");
+    }
+    d.title = "Synthetic title".into();
+    let s = uncompressed(&d, PdfOptions { author: Some("Test author".into()), created: Some(1_700_000_000), ..Default::default() });
+    for key in ["/Title", "/Author", "/CreationDate", "<dc:title>", "<dc:creator>"] {
+        assert!(s.contains(key), "missing populated metadata {key}");
+    }
+    assert!(s.contains("Synthetic title") && s.contains("Test author"));
 }

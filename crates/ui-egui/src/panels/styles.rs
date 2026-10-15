@@ -78,8 +78,8 @@ pub fn character(app: &mut DesignApp, ui: &mut egui::Ui) {
     list(app, ui, false);
 }
 
-/// One style in the list: click applies (⌥ clears overrides), double-click edits (paragraph),
-/// right-click: apply, break link, move to group.
+/// One style in the list: click applies (⌥ clears overrides), double-click edits,
+/// right-click: edit, apply, break link, move to group.
 fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, current: Option<&str>, groups: &[String], t: &Tokens) {
     let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     if current == Some(n) {
@@ -96,8 +96,9 @@ fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, curren
         egui::FontId::proportional(12.5),
         t.text,
     );
-    if resp.double_clicked() && para {
-        app.ui.dialog = Some(crate::dialogs::Dialog::new("paragraphStyleOptions", json!({"name": n})));
+    let editable = n != if para { designcraft_doc::NO_PARA_STYLE } else { designcraft_doc::NO_CHAR_STYLE };
+    if resp.double_clicked() && editable {
+        crate::dialogs::open_style_options(app, para, n);
     } else if resp.clicked() {
         let cmd = if para { "style.paragraph.apply" } else { "style.character.apply" };
         let clear = ui.input(|i| i.modifiers.alt);
@@ -105,17 +106,12 @@ fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, curren
     }
     let kind = if para { "paragraph" } else { "character" };
     resp.context_menu(|ui| {
-        if ui
-            .button(crate::rtl::widget(
-                ui,
-                format!(
-                    "{} \"{}\"",
-                    crate::i18n::tr(&app.ui.language, "Apply"),
-                    if n.contains('/') { shown } else { crate::i18n::style_name(&app.ui.language, shown) }
-                ),
-            ))
-            .clicked()
-        {
+        let label = if n.contains('/') { shown } else { crate::i18n::style_name(&app.ui.language, shown) };
+        if editable && ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Edit \"{name}\"…").replace("{name}", label))).clicked() {
+            crate::dialogs::open_style_options(app, para, n);
+            ui.close();
+        }
+        if ui.button(crate::rtl::widget(ui, format!("{} \"{}\"", crate::i18n::tr(&app.ui.language, "Apply"), label))).clicked() {
             let cmd = if para { "style.paragraph.apply" } else { "style.character.apply" };
             let _ = app.run(cmd, json!({"name": n}));
             ui.close();
@@ -125,7 +121,7 @@ fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, curren
             ui.close();
         }
         if !n.starts_with('[') {
-            ui.menu_button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Move to Group")), |ui| {
+            crate::menus::menu_button(ui, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Move to Group")), |ui| {
                 if n.contains('/') && ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "[No Group]"))).clicked() {
                     let _ = app.run("style.group", json!({"kind": kind, "names": [n], "group": ""}));
                     ui.close();
@@ -152,5 +148,60 @@ fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, curren
                 ui.data_mut(|d| d.insert_temp(id, name));
             });
         }
+        if para && !n.starts_with('[') {
+            ui.separator();
+            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Delete Paragraph Style…"))).clicked() {
+                app.ui.dialog = Some(crate::dialogs::Dialog::new("deleteParagraphStyle", json!({"name": n})));
+                ui.close();
+            }
+        }
+        if !para && !n.starts_with('[') {
+            ui.separator();
+            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Delete Character Style…"))).clicked() {
+                app.ui.dialog = Some(crate::dialogs::Dialog::new("deleteCharacterStyle", json!({"name": n})));
+                ui.close();
+            }
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    use super::*;
+
+    #[test]
+    fn character_style_plus_captures_selection_for_reuse() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let frame = app.run("frame.create", json!({"rect": [36, 36, 300, 200], "content": "text", "text": "alpha beta"})).unwrap();
+        app.run("text.select", json!({"story": frame["story"], "anchor": 0, "focus": 5})).unwrap();
+        app.run("type.char", json!({"underline": true})).unwrap();
+        let selection = app.session.doc().unwrap().selection.clone();
+        let undo_len = app.session.doc().unwrap().history.undo.len();
+        let mut h = Harness::builder().with_size(vec2(360.0, 240.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let id = egui::Id::new("test_fonts");
+                if ui.data(|d| d.get_temp::<bool>(id)).is_none() {
+                    crate::theme::install_fonts(ui.ctx(), "");
+                    ui.data_mut(|d| d.insert_temp(id, true));
+                    return;
+                }
+                character(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        h.get_by_label("Create New Style from Selection").click();
+        h.run_steps(3);
+        let app = h.state_mut();
+        let style = app.session.doc().unwrap().doc.styles.char_style("Character Style 1").unwrap();
+        assert_eq!(style.chars, designcraft_doc::CharAttrs { underline: Some(true), ..Default::default() });
+        assert_eq!(app.session.doc().unwrap().selection, selection);
+        assert_eq!(app.session.doc().unwrap().history.undo.len(), undo_len + 1);
+        app.run("text.select", json!({"story": frame["story"], "anchor": 6, "focus": 10})).unwrap();
+        app.run("style.character.apply", json!({"name": "Character Style 1"})).unwrap();
+        assert_eq!(app.run("type.selectionAttrs", json!({})).unwrap()["chars"]["underline"], true);
+    }
 }
